@@ -1,28 +1,101 @@
 # Portfolio Workbench
 
-An interactive portfolio construction and experimentation tool: choose instruments, say
-how much you want each, set risk/horizon/constraints, see what the model produces and
-why, tweak anything, see the consequences immediately.
+A small historical Sharpe optimiser. Select from the existing UK/GBP asset list,
+choose a historical window, optionally set per-asset weight bounds and an annual
+risk-free rate, then optimise. Results show allocation, historical annualised return,
+annualised volatility, Sharpe ratio, and the risk-free rate used.
 
-
-## Setup
+## Setup and run
 
 ```bash
 uv sync
+uv run uvicorn api.main:app --reload
 ```
 
-## Commands
+In another terminal:
 
 ```bash
-uv run pytest                                    # tests (never touch the network)
-uv run ruff check . && uv run ruff format .
-uv run mypy src/workbench/engine src/workbench/models
-uv run workbench --help
+cd frontend
+npm install
+npm run dev
 ```
 
-### `metrics`: risk/return metrics for a fixed weight mix
+Open http://localhost:5173. Select assets, adjust the settings, and click **Optimise
+portfolio**. The default lookback is five years; the risk-free rate defaults to an
+assumed 4% annually and can be overridden. Weight bounds default to 0–100%; selected
+assets may receive zero weight. There is no cash allocation or short-selling.
+
+The existing Vue layout and allocation chart are retained. The frontend talks only to
+FastAPI at http://127.0.0.1:8000. Price fetching uses yfinance with a 24-hour local
+Parquet cache under `.cache/prices/`; the first request needs a network connection.
+
+## API
+
+`GET /instruments/universe` returns the fixed asset list. `POST /optimize` accepts:
+
+```json
+{
+  "tickers": ["VWRP.L", "VAGP.L"],
+  "lookback_years": 5,
+  "weight_bounds": {"VWRP.L": [0.1, 0.6]},
+  "risk_free_rate": 0.04
+}
+```
+
+Only `tickers` is required. Rates and weights use decimals (`0.04` means 4%). The
+response contains `weights`, `metrics` (`historical_return`, `volatility`, `sharpe`),
+and `risk_free_rate`. The frontend uses percentage inputs and converts them at this
+boundary. Invalid requests, unusable data, and failed solves return clear errors;
+no fallback allocation is substituted. `/build` and the old preference contract have
+been retired. Interactive API documentation is at http://127.0.0.1:8000/docs.
+
+## Python structure
+
+```text
+src/workbench/
+  data.py         adjusted prices and a request-window cache
+  metrics.py      historical estimates and portfolio metrics
+  optimiser.py    constrained Sharpe maximisation
+  models.py       request/result schemas and fixed asset list
+  constants.py    annualisation and defaults
+  cli.py          thin command-line wrapper
+api/main.py       HTTP routes
+frontend/src/     Vue UI and allocation chart
+```
+
+Historical simple-return means retain 50% shrinkage toward the selected assets'
+common mean. Covariance uses Ledoit-Wolf shrinkage. SciPy SLSQP maximises the resulting
+annualised Sharpe with deterministic starting allocations; it is a numerical solution,
+not proof of a global maximum. All reported metrics use the same estimates as the
+objective. See [docs/model.md](docs/model.md) for the definitions and limitations.
+
+## CLI
 
 ```bash
-uv run workbench metrics --tickers VWRP.L VAGP.L --weights 0.7 0.3
+uv run workbench optimize --tickers VWRP.L VAGP.L --lookback-years 5 \
+  --bound VWRP.L=0.1,0.6 --risk-free-rate 0.04
 ```
 
+For an offline run using the recorded test fixture:
+
+```bash
+uv run workbench optimize --tickers VWRP.L VAGP.L --lookback-years 30 \
+  --prices-csv tests/fixtures/prices_fixture.csv
+```
+
+CSV data must have a `Date` column and a price column per selected ticker. The requested
+historical window also applies to CSV input. The old `build`/`metrics` commands and
+standalone experimental `main.py` have been retired.
+
+## Checks
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src/workbench api
+cd frontend && npm run build
+```
+
+Tests use recorded prices, controlled calculations, and mocked data fetching. They
+never contact Yahoo Finance.

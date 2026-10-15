@@ -1,85 +1,71 @@
-from datetime import date
-
+import numpy as np
+import pandas as pd
 import pytest
 
-from workbench.analytics.metrics import (
-    compute_portfolio_metrics,
-    effective_n,
-    herfindahl_index,
-    weighted_expense_ratio,
-)
-from workbench.data.providers.synthetic import SyntheticProvider
-from workbench.models.instrument import AssetClass, Instrument
+from workbench.metrics import estimate_returns, portfolio_metrics
 
 
-def _instrument(ticker: str, ter: float | None) -> Instrument:
-    return Instrument(
-        ticker=ticker,
-        name=ticker,
-        asset_class=AssetClass.ETF,
-        currency="GBP",
-        region="Global",
-        ter=ter,
+def test_known_portfolio_metrics() -> None:
+    metrics = portfolio_metrics(
+        np.array([0.6, 0.4]), np.array([0.10, 0.05]), np.diag([0.04, 0.01]), 0.02
     )
+    assert metrics.historical_return == pytest.approx(0.08)
+    assert metrics.volatility == pytest.approx(np.sqrt(0.016))
+    assert metrics.sharpe == pytest.approx(0.06 / np.sqrt(0.016))
 
 
-def test_herfindahl_and_effective_n_for_equal_weights() -> None:
-    weights = {"A": 0.5, "B": 0.5}
-    assert herfindahl_index(weights) == pytest.approx(0.5)
-    assert effective_n(weights) == pytest.approx(2.0)
-
-
-def test_herfindahl_and_effective_n_for_single_holding() -> None:
-    weights = {"A": 1.0}
-    assert herfindahl_index(weights) == pytest.approx(1.0)
-    assert effective_n(weights) == pytest.approx(1.0)
-
-
-def test_weighted_ter_averages_known_values() -> None:
-    instruments = [_instrument("A", 0.001), _instrument("B", 0.003)]
-    result = weighted_expense_ratio({"A": 0.5, "B": 0.5}, instruments)
-    assert result == pytest.approx(0.002)
-
-
-def test_weighted_ter_is_none_when_any_ter_unknown() -> None:
-    instruments = [_instrument("A", 0.001), _instrument("B", None)]
-    result = weighted_expense_ratio({"A": 0.5, "B": 0.5}, instruments)
-    assert result is None
-
-
-def test_compute_portfolio_metrics_returns_sane_values() -> None:
-    provider = SyntheticProvider(
-        seed=5, asset_classes={"A": AssetClass.STOCK, "B": AssetClass.BOND}
+def test_single_asset_estimates_use_simple_returns() -> None:
+    prices = pd.DataFrame(
+        {"A": [100, 110, 99, 118.8]}, index=pd.date_range("2024-01-01", periods=4)
     )
-    prices = provider.get_prices(["A", "B"], date(2015, 1, 1), date(2024, 12, 31))
-    instruments = [_instrument("A", 0.0022), _instrument("B", 0.0015)]
+    mean, covariance = estimate_returns(prices, ["A"])
+    # Daily returns are +10%, -10%, +20%. Covariance uses population normalisation.
+    assert mean[0] == pytest.approx((0.1 - 0.1 + 0.2) / 3 * 252)
+    assert covariance[0, 0] == pytest.approx(np.var([0.1, -0.1, 0.2]) * 252)
 
-    metrics = compute_portfolio_metrics(
-        weights={"A": 0.6, "B": 0.4},
-        instruments=instruments,
-        prices=prices,
-        risk_free_rate=0.04,
+
+def test_missing_prices_are_not_filled_or_bridged() -> None:
+    prices = pd.DataFrame(
+        {"A": [100, 110, np.nan, 100, 120], "B": [100, 100, 200, 200, 200]},
+        index=pd.date_range("2024-01-01", periods=5),
     )
-
-    assert metrics.volatility > 0
-    assert metrics.max_drawdown <= 0
-    assert metrics.hhi == pytest.approx(0.6**2 + 0.4**2)
-    assert metrics.effective_n == pytest.approx(1 / (0.6**2 + 0.4**2))
-    assert metrics.weighted_ter == pytest.approx(0.6 * 0.0022 + 0.4 * 0.0015)
+    mean, _ = estimate_returns(prices, ["A", "B"])
+    # Only days 2 and 5 have valid one-step returns for both assets.
+    # A's mean is 15%, B's is 0%; each shrinks halfway toward 7.5%.
+    assert mean == pytest.approx(np.array([0.1125, 0.0375]) * 252)
 
 
-def test_concentrated_portfolio_has_lower_effective_n_than_diversified() -> None:
-    provider = SyntheticProvider(
-        seed=6, asset_classes={"A": AssetClass.STOCK, "B": AssetClass.BOND}
-    )
-    prices = provider.get_prices(["A", "B"], date(2015, 1, 1), date(2024, 12, 31))
-    instruments = [_instrument("A", 0.001), _instrument("B", 0.001)]
+def test_estimates_keep_ticker_order_and_covariance_is_positive_semidefinite(prices) -> None:
+    tickers = ["VAGP.L", "VWRP.L", "ISF.L"]
+    mean, covariance = estimate_returns(prices, tickers)
+    reversed_mean, reversed_covariance = estimate_returns(prices, tickers[::-1])
+    assert mean == pytest.approx(reversed_mean[::-1])
+    assert covariance == pytest.approx(reversed_covariance[::-1, ::-1])
+    assert np.linalg.eigvalsh(covariance).min() >= -1e-12
 
-    concentrated = compute_portfolio_metrics(
-        {"A": 0.95, "B": 0.05}, instruments, prices, risk_free_rate=0.04
-    )
-    diversified = compute_portfolio_metrics(
-        {"A": 0.5, "B": 0.5}, instruments, prices, risk_free_rate=0.04
-    )
 
-    assert concentrated.effective_n < diversified.effective_n
+@pytest.mark.parametrize("bad_price", [0, -1, np.inf, -np.inf])
+def test_rejects_invalid_prices(prices, bad_price) -> None:
+    prices.iloc[0, 0] = bad_price
+    with pytest.raises(ValueError, match="positive and finite"):
+        estimate_returns(prices, ["VWRP.L"])
+
+
+def test_rejects_missing_columns_and_insufficient_overlap(prices) -> None:
+    with pytest.raises(ValueError, match="missing price data.*UNKNOWN"):
+        estimate_returns(prices, ["UNKNOWN"])
+    with pytest.raises(ValueError, match="two overlapping"):
+        estimate_returns(prices.iloc[:2], ["VWRP.L"])
+    prices["VAGP.L"] = np.nan
+    with pytest.raises(ValueError, match="two overlapping"):
+        estimate_returns(prices, ["VWRP.L", "VAGP.L"])
+
+
+def test_rejects_duplicate_dates(prices) -> None:
+    with pytest.raises(ValueError, match="unique dates"):
+        estimate_returns(pd.concat([prices, prices.iloc[:1]]), ["VWRP.L"])
+
+
+def test_zero_volatility_has_no_sharpe() -> None:
+    with pytest.raises(ValueError, match="volatility is zero"):
+        portfolio_metrics(np.array([1.0]), np.array([0.04]), np.zeros((1, 1)), 0.04)

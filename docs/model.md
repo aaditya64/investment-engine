@@ -1,115 +1,89 @@
-# Model documentation
+# Portfolio model
 
-The maths behind `src/workbench`, kept in sync with the code (CLAUDE.md). Milestone 1
-(foundations) only — preference→parameter mappings arrive with the Milestone 2 engine
-and will be documented here as they're built.
+## Inputs and scope
 
-## Constants
+Select from the eight existing instruments in `workbench.models.UNIVERSE`. The
+historical window is a lookback in years ending today, default five years. Per-asset
+bounds default to 0–100%. Portfolios are long-only, fully invested, and contain only
+selected assets; zero allocations are allowed. The annual risk-free rate defaults to
+4%, an assumption that users can override. It is a Sharpe benchmark, not a cash holding.
 
-- `TRADING_DAYS_PER_YEAR = 252` (`workbench/constants.py`) — the one annualisation
-  factor used everywhere; nothing re-derives it locally.
-- `DEFAULT_RISK_FREE_RATE = 0.04` — an assumption, not a fact, always surfaced via
-  `AssumptionsPanel`. Override with `--risk-free-rate`.
+## Historical estimates
 
-## Returns: log vs. simple
+Fetch daily adjusted closes through yfinance with `auto_adjust=True`, including the
+requested end date. Normalise identified GBp quotes to GBP. Keep the current instrument
+universe; this model does not convert arbitrary foreign-currency assets.
 
-Both are computed (`analytics/returns.py`), each for a reason:
+Sort prices by date and require unique dates. For each asset calculate simple returns:
 
-- **Log returns** (`ln(p_t / p_{t-1})`) are used internally for covariance/shrinkage,
-  because they are additive over *time* for a single asset.
-- **Simple returns** (`p_t / p_{t-1} - 1`) are used wherever returns are combined
-  *across* assets into a portfolio return (backtest, Sortino, drawdown), because a
-  portfolio's simple return is exactly the weight-weighted sum of its holdings' simple
-  returns — which is not true for log returns.
-
-Converting an estimate from one world to the other: an annualised simple return from a
-mean daily log return is `exp(mean_daily_log_return * 252) - 1` (see
-`annualised_simple_return_from_log_mean`).
-
-## Expected returns: shrinkage
-
-Raw historical mean returns are very noisy over the sample sizes available (a few years
-of daily data). `analytics/expected_returns.shrink_to_grand_mean` pulls each
-instrument's raw mean toward the cross-sectional grand mean across the selected
-instruments:
-
-```
-shrunk_i = (1 - shrinkage) * raw_i + shrinkage * mean(raw)
+```text
+r[t, i] = price[t, i] / price[t-1, i] - 1
 ```
 
-**Judgement call:** V1 shrinks toward the grand mean (`DEFAULT_SHRINKAGE = 0.5`), not a
-market-equilibrium (CAPM) prior. Equilibrium-based shrinkage (Black-Litterman) is
-deferred to roadmap item 6 by deliberate choice, not oversight — conviction-as-a-view
-is a natural fit for that later model.
+Prices must be positive and finite when present. Never fill missing prices. Retain only
+rows with a valid one-step return for every selected asset, requiring at least two such
+observations. This avoids fabricating returns or calculating across an interior missing
+price. A short or unrepresentative sample can still produce unreliable estimates.
 
-## Covariance: Ledoit-Wolf shrinkage
+Use 252 trading days per year. Retain the existing 50% mean shrinkage, applied to simple
+returns consistently instead of the old mixture of log-return estimates and portfolio
+simple-return metrics:
 
-`analytics/covariance.shrunk_annual_covariance` fits `sklearn.covariance.LedoitWolf` on
-daily log returns and scales the result by `TRADING_DAYS_PER_YEAR` to annualise (i.e.
-assumes i.i.d. daily returns — no attempt to model autocorrelation). Raw sample
-covariance is not used anywhere.
+```text
+raw_mean[i] = mean(r[:, i])
+mu[i] = 252 * (0.5 * raw_mean[i] + 0.5 * mean(raw_mean))
+Sigma = 252 * LedoitWolf(r).covariance_
+```
 
-## Portfolio metrics (`analytics/metrics.compute_portfolio_metrics`)
+Mean shrinkage pulls estimates toward the selected assets' common mean. Ledoit-Wolf
+regularises covariance toward a scaled identity matrix. Both are fixed modelling
+choices, not user preference sliders. See the [scikit-learn estimator documentation](https://scikit-learn.org/stable/modules/generated/sklearn.covariance.LedoitWolf.html).
 
-**Judgement call, documented:** this function mixes a forward-looking estimate with a
-historical realisation, split by what each quantity can honestly represent:
+`mu` is an annualised arithmetic historical estimate, not CAGR or a forecast.
+Annualisation assumes the usual independent-daily-return scaling; it does not model
+serial correlation. Shrinkage reduces some estimation noise but does not eliminate it.
 
-| Metric | Basis | Why |
-|---|---|---|
-| `expected_return` | shrunk per-asset means, weight-dot | the whole point of shrinking is to use it, not the noisy raw history |
-| `volatility` | `sqrt(wᵗ Σ w)`, Σ = shrunk annual covariance | consistent pairing with `expected_return`; same estimate family the Milestone 2 optimiser will use |
-| `sharpe` | `(expected_return - rf) / volatility` | both inputs are the shrunk estimate |
-| `sortino` | realised historical weighted-return path (periodic-rebalance backtest), downside deviation only | downside deviation is path-dependent; a covariance matrix has no notion of it |
-| `max_drawdown` | same realised historical path | explicitly required to be a historical output, not an optimised-for quantity — max drawdown isn't convex (see CLAUDE.md engine-approach notes) |
-| `hhi`, `effective_n` | weights only (`Σw_i²`, `1/hhi`) | no data dependency |
-| `weighted_ter` | weight-dot of `Instrument.ter` | **`None`** (not 0) if any held instrument's TER is unknown — an unknown input must not silently become a known-looking number |
+## Objective and reported metrics
 
-## Backtest (`analytics/backtest.fixed_weight_backtest`)
+For weights `w` and the supplied annual risk-free rate `rf`:
 
-Replays a fixed target mix over real price history. **Judgement call:** rebalances back
-to the target weights at the start of each calendar month (`DEFAULT_REBALANCE_FREQ =
-"M"`), letting weights drift with daily compounding within the month. This matches the
-conventional meaning of "how did a 60/40 portfolio perform" (the stated mix, held
-constant), rather than a pure buy-and-hold drift. No transaction costs are modelled.
-Not yet exposed as a CLI/API option.
+```text
+historical_return = w · mu
+volatility = sqrt(wᵀ Sigma w)
+sharpe = (historical_return - rf) / volatility
 
-## History-length warning
+maximise sharpe
+subject to sum(w) = 1 and lower[i] <= w[i] <= upper[i]
+```
 
-`analytics/returns.tickers_with_short_history` flags any ticker with less than
-`MIN_HISTORY_YEARS = 3.0` years of non-missing price observations, per CLAUDE.md's
-honesty rule. Detection only — the caller decides whether to exclude the ticker or use
-a documented proxy, and must surface the warning either way (the `metrics` CLI always
-does).
+The objective and all reported metrics use the exact same estimates over all selected
+assets, including those that end up at zero weight. Never re-estimate over only the
+held assets. The result returns every selected ticker's weight and the rate actually
+used. Zero or undefined volatility is an error, not an invented Sharpe ratio.
 
-## SyntheticProvider
+## Numerical solve
 
-`data/providers/synthetic.py` generates fully synthetic price paths via a seeded
-geometric Brownian motion — **no real market data is used anywhere in its
-construction**. Per-asset-class annualised drift/volatility defaults:
+SciPy's existing SLSQP solver minimises negative Sharpe with an analytic gradient,
+500 iterations maximum, and objective tolerance `1e-10`. Direct Sharpe is not the old
+convex cvxpy penalty objective. See the [SciPy solver documentation](https://docs.scipy.org/doc/scipy/reference/optimize.minimize-slsqp.html).
 
-| Asset class | Annual drift | Annual vol |
-|---|---|---|
-| Stock | 8% | 20% |
-| ETF | 7% | 15% |
-| Bond | 3% | 6% |
-| Commodity | 5% | 18% |
-| *(unknown ticker)* | 7% | 15% |
+Start deterministically from a feasible spread allocation and allocations favouring
+each selected asset. Choose the best successful solve that satisfies all constraints.
+Multiple starts help with negative excess returns and starting-point sensitivity;
+they do not prove global optimality. If bounds uniquely determine the allocation,
+calculate its metrics directly. Validate total weight and bounds within `1e-7`, clip
+only numerical bound violations, and recheck. Do not renormalise weights in a way that
+can break the requested bounds. Never substitute an equal-weight/heuristic fallback.
 
-These are hand-set round numbers for testing and demos, not calibrated to anything. An
-optional correlation matrix can be supplied (identity/independent by default) so tests
-can assert behaviour against a *known* correlation structure. Any output from this
-provider must be labelled "synthetic" wherever shown to a user — the `metrics` CLI does
-this automatically via a warning.
+## Data cache and errors
 
-## FixtureProvider
+One Parquet cache entry per ticker selection and requested date range, expiring after
+24 hours. Cache coverage uses the requested dates, so weekends and market holidays do
+not force repeated downloads. Unreadable entries are fetched again. No exposure,
+synthetic-provider, or fixture-provider framework is needed; tests use DataFrames and
+mock market fetching.
 
-`data/providers/fixture.py` loads a frozen CSV of **real** historical prices for
-deterministic, network-free tests. `tests/fixtures/prices_fixture.csv` is a 2022–2023
-slice (VWRP.L, VAGP.L, ISF.L) sourced from Yahoo Finance via `yfinance`, frozen on disk.
-
-## Currency handling
-
-`YFinanceProvider` normalises LSE pence-quoted instruments (`fast_info.currency ==
-"GBp"`) to pounds by dividing by 100. This is detected per-ticker via a live lookup, so
-it cannot be exercised in tests (which never touch the network) — covered by manual
-verification only (see Milestone 1 report).
+Validate selection, duplicate tickers, finite inputs, and feasible bounds before
+fetching. Require each minimum <= maximum, total minima <= 100%, and total maxima >=
+100%. HTTP validation/calculation errors return 422; market-data availability errors
+return 502. Solver failure produces a clear error, never a plausible-looking allocation.
