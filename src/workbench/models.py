@@ -1,5 +1,6 @@
 """The fixed asset selection and the small optimisation request/result contract."""
 
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -70,3 +71,44 @@ class PortfolioResult(BaseModel):
     weights: dict[str, float]
     metrics: PortfolioMetrics
     risk_free_rate: float
+
+
+class BacktestRequest(PortfolioRequest):
+    """Fit on the first train_fraction of price rows; evaluate on the rest."""
+
+    train_fraction: float = Field(default=0.8, gt=0, lt=1)
+
+
+class BacktestMetrics(BaseModel):
+    """Realised arithmetic annual return, sample volatility, and annual Sharpe."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    annualised_return: float
+    volatility: float = Field(ge=0)
+    sharpe: float | None  # Undefined when the realised return path has zero volatility.
+
+
+class BacktestPortfolio(BaseModel):
+    weights: dict[str, float]
+    metrics: BacktestMetrics
+
+
+class GrowthPoint(BaseModel):
+    date: date
+    optimised: float
+    equal_weight: float | None
+
+
+class BacktestResult(BaseModel):
+    training_start: date
+    training_end: date
+    test_start: date
+    test_end: date
+    risk_free_rate: float
+    starting_value: float
+    optimised: BacktestPortfolio
+    equal_weight: BacktestPortfolio | None
+    baseline_unavailable_reason: str | None
+    data_warnings: list[str] = Field(default_factory=list)
+    growth: list[GrowthPoint]

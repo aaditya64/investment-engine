@@ -87,3 +87,56 @@ Validate selection, duplicate tickers, finite inputs, and feasible bounds before
 fetching. Require each minimum <= maximum, total minima <= 100%, and total maxima >=
 100%. HTTP validation/calculation errors return 422; market-data availability errors
 return 502. Solver failure produces a clear error, never a plausible-looking allocation.
+
+## Out-of-sample backtest and equal-weight baseline
+
+`POST /backtest` adds `train_fraction`, default 0.8. Sort selected price rows
+chronologically and split at `floor(row_count * train_fraction)` **before estimating
+returns or covariance**. At least three training prices and two later test prices are
+required. Missing training observations follow the estimator's existing rules; the
+purchase close must have complete prices for all selected assets. A purchase-price
+error identifies the affected date and tickers.
+
+Fit the existing optimiser only on the training rows. The last training close is the
+assumed frictionless purchase price and the £1,000 chart anchor. Each measured return
+ends on a strictly later date, including the move into the first test close. The
+response reports actual training/test dates. This is one holdout evaluation; no test
+prices are used to choose or update weights.
+
+Keep purchased units fixed. For starting weights `w`, purchase prices `P[0]`, and test
+prices `P[t]`, the portfolio value and daily realised return are:
+
+```text
+V[t] = 1000 * sum(w[i] * P[t, i] / P[0, i])
+r[t] = V[t] / V[t-1] - 1  # only when both adjacent original rows are complete
+
+annualised_return = mean(r) * 252
+volatility = sample_std(r, ddof=1) * sqrt(252)
+sharpe = (annualised_return - rf) / volatility
+```
+
+Weights drift as prices move; there is no daily rebalancing, and bounds apply to the
+starting allocation. Both portfolios use the same dates, adjusted prices, starting
+value, and user-supplied constant annual risk-free rate. Transaction costs and taxes
+are not modelled. The annualised return is arithmetic, not CAGR; these are actual
+held-out return-path metrics with no shrinkage. Effectively zero realised volatility
+(`<= 1e-10`) produces an undefined (`null`) Sharpe, while its growth curve remains valid.
+
+Missing test quotes do not invalidate the entire backtest. The chart uses only closes
+where all selected assets have prices, without filling missing values. Daily metrics
+exclude each incomplete row and the return into its following row, so a multi-day
+move across a missing quote is never counted as a one-day return. Require at least two
+remaining daily observations. `data_warnings` names affected assets and example dates;
+test start/end reflect the available shared valuation dates. Trailing incomplete quotes
+are omitted. The original chronological split remains fixed before this handling,
+so future missingness cannot change the training allocation.
+
+The baseline starts with `1 / asset_count` in each selected asset and also buys and
+holds. Include it only if those starting weights respect every supplied bound within
+numerical tolerance; otherwise return an explanation and no baseline metrics/curve.
+Do not silently alter equal weights to fit the constraints.
+
+Tests assert the exact split and purchase/test boundary, known fixed-unit growth and
+metrics, purchase-price errors, safe gap handling, baseline eligibility, zero-volatility
+handling, and the
+invariant that changing held-out prices cannot change the fitted allocation.

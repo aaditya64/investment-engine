@@ -23,3 +23,12 @@ export function optimizePortfolio(payload, signal) {
     signal,
   }).then(handle);
 }
+
+export function backtestPortfolio(payload, signal) {
+  return fetch(`${API_BASE}/backtest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  }).then(handle);
+}

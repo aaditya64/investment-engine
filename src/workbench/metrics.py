@@ -11,6 +11,24 @@ from workbench.models import PortfolioMetrics
 type FloatArray = NDArray[np.float64]
 
 
+def price_history(prices: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
+    """Validate and sort selected daily prices without filling or dropping missing rows."""
+    missing = set(tickers) - set(prices.columns)
+    if missing:
+        raise ValueError(f"missing price data for: {', '.join(sorted(missing))}")
+    if (
+        not isinstance(prices.index, pd.DatetimeIndex)
+        or prices.index.has_duplicates
+        or prices.index.hasnans
+    ):
+        raise ValueError("price history must have unique dates")
+    aligned = prices.loc[:, tickers].sort_index().astype(float)
+    values = aligned.to_numpy()
+    if np.isinf(values).any() or (values <= 0).any():
+        raise ValueError("prices must be positive and finite when present")
+    return aligned
+
+
 def estimate_returns(prices: pd.DataFrame, tickers: list[str]) -> tuple[FloatArray, FloatArray]:
     """Estimate annual returns and covariance from overlapping daily simple returns.
 
@@ -18,15 +36,7 @@ def estimate_returns(prices: pd.DataFrame, tickers: list[str]) -> tuple[FloatArr
     row's prices for every selected asset. Means shrink 50% toward the cross-asset mean;
     Ledoit-Wolf regularises covariance. Both estimates use the same observations.
     """
-    missing = set(tickers) - set(prices.columns)
-    if missing:
-        raise ValueError(f"missing price data for: {', '.join(sorted(missing))}")
-    if not isinstance(prices.index, pd.DatetimeIndex) or prices.index.has_duplicates:
-        raise ValueError("price history must have unique dates")
-    aligned = prices.loc[:, tickers].sort_index().astype(float)
-    values = aligned.to_numpy()
-    if np.isinf(values).any() or (values <= 0).any():
-        raise ValueError("prices must be positive and finite when present")
+    aligned = price_history(prices, tickers)
     returns = aligned.pct_change(fill_method=None).dropna(how="any")
     if len(returns) < 2:
         raise ValueError("need at least two overlapping daily returns for all selected assets")
