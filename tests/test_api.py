@@ -15,19 +15,50 @@ def mock_market_data(monkeypatch, prices):
     monkeypatch.setattr("api.main.get_prices", lambda *_: prices)
 
 
-def test_health_and_current_universe() -> None:
+def test_health() -> None:
     assert client.get("/health").json() == {"status": "ok"}
-    response = client.get("/instruments/universe")
-    assert [item["ticker"] for item in response.json()] == [
-        "VWRP.L",
-        "VUAG.L",
-        "EQQQ.L",
-        "ISF.L",
-        "VFEA.L",
-        "VAGP.L",
-        "IGLT.L",
-        "SGLN.L",
-    ]
+
+
+def test_global_search_endpoint(monkeypatch) -> None:
+    from workbench.models import Instrument
+
+    def search(query):
+        assert query in ("Nvidia", "NVDA")
+        return [
+            Instrument(
+                ticker="NVDA", name="NVIDIA Corporation", asset_class="stock", exchange="NASDAQ"
+            )
+        ]
+
+    monkeypatch.setattr("api.main.search_assets", search)
+    for query in ("Nvidia", "NVDA"):
+        response = client.get("/instruments/search", params={"q": query})
+        assert response.status_code == 200
+        assert response.json()[0]["ticker"] == "NVDA"
+        assert response.json()[0]["exchange"] == "NASDAQ"
+
+
+def test_search_failure_is_visible(monkeypatch) -> None:
+    def unavailable(_):
+        raise PriceDataError("asset search unavailable")
+
+    monkeypatch.setattr("api.main.search_assets", unavailable)
+    response = client.get("/instruments/search", params={"q": "NVDA"})
+    assert response.status_code == 502
+    assert response.json()["detail"] == "asset search unavailable"
+
+
+@pytest.mark.parametrize("query", ["", "x" * 81])
+def test_search_query_validation(query) -> None:
+    assert client.get("/instruments/search", params={"q": query}).status_code == 422
+
+
+def test_newly_searchable_asset_can_be_optimised_and_backtested(monkeypatch, prices) -> None:
+    renamed = prices.rename(columns={"ISF.L": "NVDA", "VWRP.L": "EQGB.L"})
+    monkeypatch.setattr("api.main.get_prices", lambda *_: renamed)
+    for route in ("/optimize", "/backtest"):
+        response = client.post(route, json={"tickers": ["NVDA", "EQGB.L"]})
+        assert response.status_code == 200, response.text
 
 
 def test_optimization_contract_and_rate_used(monkeypatch, prices) -> None:
@@ -49,7 +80,8 @@ def test_optimization_contract_and_rate_used(monkeypatch, prices) -> None:
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == {"weights", "metrics", "risk_free_rate"}
+    assert set(body) == {"weights", "metrics", "risk_free_rate", "base_currency"}
+    assert body["base_currency"] == "GBP"
     assert set(body["metrics"]) == {"historical_return", "volatility", "sharpe"}
     assert body["risk_free_rate"] == 0.02
     assert sum(body["weights"].values()) == pytest.approx(1, abs=1e-7)
@@ -64,7 +96,7 @@ def test_optimization_contract_and_rate_used(monkeypatch, prices) -> None:
 @pytest.mark.parametrize(
     "extra",
     [
-        {"tickers": ["AAPL"]},
+        {"tickers": ["bad/ticker"]},
         {"preferences": {}},
         {"provider": "synthetic"},
         {"weight_bounds": {"VWRP.L": [0, 0.5]}},

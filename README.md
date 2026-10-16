@@ -1,9 +1,10 @@
 # Portfolio Workbench
 
-A small historical Sharpe optimiser. Select from the existing UK/GBP asset list,
+A small historical Sharpe optimiser. Search global stocks and ETFs by ticker or name,
 choose a historical window, optionally set per-asset weight bounds and an annual
 risk-free rate, then optimise. Results show allocation, historical annualised return,
-annualised volatility, Sharpe ratio, and the risk-free rate used.
+annualised volatility, Sharpe ratio, and the risk-free rate used. Portfolio results
+are measured in GBP, using historical exchange rates for foreign-priced assets.
 
 ## Setup and run
 
@@ -20,10 +21,12 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173. Select assets, adjust the settings, and click **Optimise
-portfolio**. The default lookback is five years; the risk-free rate defaults to an
-assumed 4% annually and can be overridden. Weight bounds default to 0–100%; selected
-assets may receive zero weight. There is no cash allocation or short-selling.
+Open http://localhost:5173. Search for a ticker or name (for example `NVDA`, `Nvidia`,
+`Meta` or `EQGB`), click a result to add it, adjust the settings, and click **Optimise
+portfolio**. You can add up to 20 assets and remove them individually. The default
+lookback is five years; the risk-free rate defaults to an assumed 4% annually and can
+be overridden. Weight bounds default to 0–100%; selected assets may receive zero
+weight. There is no cash allocation or short-selling.
 
 Use **Run historical test** directly after selecting assets and settings; there is no
 need to press **Optimise portfolio** first. It fits its own allocation and evaluates
@@ -40,7 +43,13 @@ Parquet cache under `.cache/prices/`; the first request needs a network connecti
 
 ## API
 
-`GET /instruments/universe` returns the fixed asset list. `POST /optimize` accepts:
+`GET /instruments/search?q=Nvidia` queries Yahoo Finance by ticker/name and returns
+up to 10 stock/ETF matches across exchanges, with exact tickers ranked first. Each
+result includes `ticker`, `name`, `asset_class` and `exchange`. No fixed catalogue or
+London-only filter is used. Search needs a network connection and provider failures
+are reported explicitly.
+
+`POST /optimize` accepts:
 
 ```json
 {
@@ -53,8 +62,8 @@ Parquet cache under `.cache/prices/`; the first request needs a network connecti
 
 Only `tickers` is required. Rates and weights use decimals (`0.04` means 4%). The
 response contains `weights`, `metrics` (`historical_return`, `volatility`, `sharpe`),
-and `risk_free_rate`. The frontend uses percentage inputs and converts them at this
-boundary. Invalid requests, unusable data, and failed solves return clear errors;
+`risk_free_rate`, and `base_currency` (`GBP`). The frontend uses percentage inputs
+and converts them at this boundary. Invalid requests, unusable data, and failed solves return clear errors;
 no fallback allocation is substituted. `/build` and the old preference contract have
 been retired. Interactive API documentation is at http://127.0.0.1:8000/docs.
 
@@ -70,7 +79,7 @@ strictly between 0 and 1):
 }
 ```
 
-It returns training/test dates, the risk-free rate, `starting_value`, `optimised` and
+It returns training/test dates, the risk-free rate, `base_currency`, `starting_value`, `optimised` and
 optional `equal_weight` allocations/metrics, `baseline_unavailable_reason`, `data_warnings`, and dated
 `growth` values. The first growth point is the purchase close at the end of training;
 all measured returns end in the later test period. Realised test metrics use actual
@@ -85,11 +94,11 @@ returns are required to calculate the test metrics.
 
 ```text
 src/workbench/
-  data.py         adjusted prices and a request-window cache
+  data.py         global search, historical FX conversion and price cache
   metrics.py      historical estimates and portfolio metrics
   optimiser.py    constrained Sharpe maximisation
   backtest.py     one chronological holdout and equal-weight comparison
-  models.py       request/result schemas and fixed asset list
+  models.py       instrument and request/result schemas
   constants.py    annualisation and defaults
   cli.py          thin command-line wrapper
 api/main.py       HTTP routes
@@ -101,6 +110,29 @@ common mean. Covariance uses Ledoit-Wolf shrinkage. SciPy SLSQP maximises the re
 annualised Sharpe with deterministic starting allocations; it is a numerical solution,
 not proof of a global maximum. All reported metrics use the same estimates as the
 objective. See [docs/model.md](docs/model.md) for the definitions and limitations.
+
+## Global assets and reporting currency
+
+Live search uses [yfinance Search](https://ranaroussi.github.io/yfinance/reference/api/yfinance.Search.html).
+Search `Nvidia` or `NVDA` for NVDA, `Meta` for META, or `EQGB` for EQGB.L. Exchange
+labels distinguish listings of the same company/fund. The app accepts up to 20 Yahoo
+symbols, normalises casing, and verifies downloaded instruments are equities or ETFs.
+Currencies, crypto, indices, futures and mutual funds are excluded from asset search.
+
+GBP is the fixed reporting currency, not a restriction on asset listings. Adjusted
+foreign prices are multiplied by historical `CURGBP=X` rates before returns are
+calculated, so US stocks include their USD/GBP currency effect. GBp/GBX quotes are
+normalised to pounds. VFEA.L and other USD listings can now be selected and converted.
+Each distinct FX series is fetched once per price request. Missing FX dates may use
+an earlier quote up to three calendar days old; future quotes are never used to fill
+past dates. Isolated missing/stale FX quotes leave missing GBP valuations, handled
+like other data gaps. Entirely unavailable FX, unknown quote currencies or unavailable
+asset history produce a clear error. FX closes use daily date alignment, not intraday execution rates.
+
+The 24-hour request cache includes the GBP conversion version in its key so old
+unconverted cache entries cannot be mistaken for GBP prices. No catalogue maintenance
+or additional dependencies are required. Supplied offline CSV prices must already be
+in GBP; they bypass market fetching and automatic FX conversion.
 
 ## CLI
 

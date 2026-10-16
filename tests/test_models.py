@@ -9,7 +9,7 @@ from workbench.models import PortfolioRequest
     [
         ({"tickers": []}, "at least 1"),
         ({"tickers": ["VWRP.L", "VWRP.L"]}, "only once"),
-        ({"tickers": ["AAPL"]}, "outside the current selection"),
+        ({"tickers": ["bad/ticker"]}, "invalid ticker format"),
         ({"weight_bounds": {"ISF.L": (0, 1)}}, "selected tickers"),
         ({"weight_bounds": {"VWRP.L": (-0.1, 1)}}, "minimum <= maximum"),
         ({"weight_bounds": {"VWRP.L": (0.7, 0.6)}}, "minimum <= maximum"),
@@ -38,3 +38,20 @@ def test_optional_defaults_and_feasible_fixed_weights() -> None:
         tickers=["VWRP.L", "VAGP.L"],
         weight_bounds={"VWRP.L": (0.3, 0.3), "VAGP.L": (0.7, 0.7)},
     )
+
+
+def test_global_tickers_are_accepted_and_normalised() -> None:
+    request = PortfolioRequest(
+        tickers=[" nvda ", "meta", "EQGB.L", "VFEA.L"],
+        weight_bounds={"nvda": (0.1, 0.6)},
+    )
+    assert request.tickers == ["NVDA", "META", "EQGB.L", "VFEA.L"]
+    assert request.weight_bounds == {"NVDA": (0.1, 0.6)}
+    with pytest.raises(ValidationError, match="only once"):
+        PortfolioRequest(tickers=["nvda", "NVDA"])
+
+
+def test_portfolio_size_is_bounded() -> None:
+    PortfolioRequest(tickers=[f"TEST{i}" for i in range(20)])
+    with pytest.raises(ValidationError, match="at most 20"):
+        PortfolioRequest(tickers=[f"TEST{i}" for i in range(21)])

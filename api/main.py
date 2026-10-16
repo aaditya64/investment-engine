@@ -1,15 +1,14 @@
-"""FastAPI routes for the fixed-universe Sharpe optimiser."""
+"""FastAPI routes for asset search, optimisation, and backtesting."""
 
 from datetime import date, timedelta
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from workbench.backtest import backtest_portfolio
-from workbench.data import PriceDataError, get_prices
+from workbench.data import PriceDataError, get_prices, search_assets
 from workbench.models import (
-    UNIVERSE,
     BacktestRequest,
     BacktestResult,
     Instrument,
@@ -32,9 +31,12 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/instruments/universe")
-def instrument_universe() -> list[Instrument]:
-    return UNIVERSE
+@app.get("/instruments/search")
+def instrument_search(q: str = Query(min_length=1, max_length=80)) -> list[Instrument]:
+    try:
+        return search_assets(q)
+    except PriceDataError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/optimize", response_model=PortfolioResult)

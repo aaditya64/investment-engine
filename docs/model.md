@@ -2,7 +2,7 @@
 
 ## Inputs and scope
 
-Select from the eight existing instruments in `workbench.models.UNIVERSE`. The
+Search global stocks and ETFs by ticker/name, selecting up to 20 assets. The
 historical window is a lookback in years ending today, default five years. Per-asset
 bounds default to 0–100%. Portfolios are long-only, fully invested, and contain only
 selected assets; zero allocations are allowed. The annual risk-free rate defaults to
@@ -11,8 +11,20 @@ selected assets; zero allocations are allowed. The annual risk-free rate default
 ## Historical estimates
 
 Fetch daily adjusted closes through yfinance with `auto_adjust=True`, including the
-requested end date. Normalise identified GBp quotes to GBP. Keep the current instrument
-universe; this model does not convert arbitrary foreign-currency assets.
+requested end date. Verify chart metadata identifies equities or ETFs and provides a
+quote currency. Normalise GBp/GBX prices to GBP. For another three-letter currency
+`CUR`, multiply prices by historical `CURGBP=X` closes (GBP per unit of CUR) **before**
+estimating returns, covariance or backtest performance. For example, a $100 share at
+0.80 GBP/USD is valued at £80; its GBP return includes subsequent FX movements.
+
+FX rates align to each asset's local daily date. A missing rate can use only a prior
+quote within three calendar days, never a later quote. Asset prices are not filled.
+The daily alignment approximates asynchronous stock/FX closing times; it is not an
+intraday execution simulation. Reuse each currency's FX history within a request and
+cache only the GBP-converted frame under a versioned key. Unknown/unsupported quote
+currencies or wholly unavailable rates fail explicitly. Isolated absent/stale rates
+leave missing GBP prices and use the existing missing-data handling. Both endpoints return
+`base_currency: "GBP"`; the risk-free benchmark also uses this reporting basis.
 
 Sort prices by date and require unique dates. For each asset calculate simple returns:
 

@@ -11,8 +11,8 @@ async function handle(response) {
   return response.json();
 }
 
-export function fetchUniverse() {
-  return fetch(`${API_BASE}/instruments/universe`).then(handle);
+export function searchInstruments(query, signal) {
+  return fetch(`${API_BASE}/instruments/search?q=${encodeURIComponent(query)}`, { signal }).then(handle);
 }
 
 export function optimizePortfolio(payload, signal) {

@@ -1,31 +1,31 @@
-"""The fixed asset selection and the small optimisation request/result contract."""
+"""Global instrument search results and optimisation/backtest contracts."""
 
+import re
 from datetime import date
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from workbench.constants import DEFAULT_RISK_FREE_RATE
 
+TICKER_PATTERN = r"^[A-Z0-9][A-Z0-9.^=\-]*$"
+TickerSymbol = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        to_upper=True,
+        min_length=1,
+        max_length=32,
+    ),
+]
+MAX_ASSETS = 20
+
 
 class Instrument(BaseModel):
-    ticker: str
+    ticker: TickerSymbol
     name: str
-    asset_class: Literal["etf", "bond", "commodity"]
-
-
-UNIVERSE = [
-    Instrument(ticker="VWRP.L", name="Vanguard FTSE All-World (acc)", asset_class="etf"),
-    Instrument(ticker="VUAG.L", name="Vanguard S&P 500 (acc)", asset_class="etf"),
-    Instrument(ticker="EQQQ.L", name="Invesco Nasdaq-100", asset_class="etf"),
-    Instrument(ticker="ISF.L", name="iShares Core FTSE 100", asset_class="etf"),
-    Instrument(ticker="VFEA.L", name="Vanguard FTSE Emerging Markets (acc)", asset_class="etf"),
-    Instrument(
-        ticker="VAGP.L", name="Vanguard Global Aggregate Bond (GBP hedged, acc)", asset_class="bond"
-    ),
-    Instrument(ticker="IGLT.L", name="iShares Core UK Gilts", asset_class="bond"),
-    Instrument(ticker="SGLN.L", name="iShares Physical Gold", asset_class="commodity"),
-]
+    asset_class: Literal["stock", "etf"]
+    exchange: str
 
 
 class PortfolioRequest(BaseModel):
@@ -33,18 +33,17 @@ class PortfolioRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    tickers: list[str] = Field(min_length=1, max_length=len(UNIVERSE))
+    tickers: list[TickerSymbol] = Field(min_length=1, max_length=MAX_ASSETS)
     lookback_years: float = Field(default=5.0, gt=0, le=30)
-    weight_bounds: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    weight_bounds: dict[TickerSymbol, tuple[float, float]] = Field(default_factory=dict)
     risk_free_rate: float = Field(default=DEFAULT_RISK_FREE_RATE, gt=-1)
 
     @model_validator(mode="after")
     def validate_selection_and_bounds(self) -> "PortfolioRequest":
         if len(self.tickers) != len(set(self.tickers)):
             raise ValueError("select each ticker only once")
-        unknown = set(self.tickers) - {item.ticker for item in UNIVERSE}
-        if unknown:
-            raise ValueError(f"tickers outside the current selection: {', '.join(sorted(unknown))}")
+        if any(not re.fullmatch(TICKER_PATTERN, ticker) for ticker in self.tickers):
+            raise ValueError("invalid ticker format")
         if set(self.weight_bounds) - set(self.tickers):
             raise ValueError("weight bounds must refer to selected tickers")
         bounds = [self.weight_bounds.get(ticker, (0.0, 1.0)) for ticker in self.tickers]
@@ -71,6 +70,7 @@ class PortfolioResult(BaseModel):
     weights: dict[str, float]
     metrics: PortfolioMetrics
     risk_free_rate: float
+    base_currency: Literal["GBP"] = "GBP"
 
 
 class BacktestRequest(PortfolioRequest):
@@ -106,6 +106,7 @@ class BacktestResult(BaseModel):
     test_start: date
     test_end: date
     risk_free_rate: float
+    base_currency: Literal["GBP"] = "GBP"
     starting_value: float
     optimised: BacktestPortfolio
     equal_weight: BacktestPortfolio | None

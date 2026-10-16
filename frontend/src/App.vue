@@ -1,7 +1,7 @@
 <script setup>
 import { Chart } from "chart.js/auto";
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
-import { backtestPortfolio, fetchUniverse, optimizePortfolio } from "./api.js";
+import { backtestPortfolio, optimizePortfolio, searchInstruments } from "./api.js";
 
 const CATEGORICAL_LIGHT = [
   "#2a78d6",
@@ -23,9 +23,14 @@ const CATEGORICAL_DARK = [
   "#9085e9",
   "#e66767",
 ];
-const OTHER_COLOR = "#c3c2b7";
-const universe = ref([]);
-const selected = reactive({});
+const selectedInstruments = ref([]);
+const searchQuery = ref("");
+const searchResults = ref([]);
+const searching = ref(false);
+const searchError = ref("");
+let searchTimer = null;
+let searchSequence = 0;
+let searchController = null;
 const weightBounds = reactive({});
 const lookbackYears = ref(5);
 const riskFreePercent = ref(4);
@@ -35,7 +40,9 @@ const errorMessage = ref("");
 const result = ref(null);
 const backtestResult = ref(null);
 const activeAction = ref(null);
-const selectedInstruments = computed(() => universe.value.filter((i) => selected[i.ticker]));
+const availableResults = computed(() => searchResults.value.filter(
+  (asset) => !selectedInstruments.value.some((selected) => selected.ticker === asset.ticker),
+));
 const darkModeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 const isDarkMode = ref(darkModeQuery.matches);
 let requestSequence = 0;
@@ -46,11 +53,47 @@ function onSchemeChange(event) {
 }
 
 function colorForTicker(ticker) {
-  // Keep an asset's colour stable when weights or the selection change.
+  // Derive colour from the ticker so searching/removing assets never changes it.
   const palette = isDarkMode.value ? CATEGORICAL_DARK : CATEGORICAL_LIGHT;
-  const index = universe.value.map((i) => i.ticker).sort().indexOf(ticker);
-  return palette[index] || OTHER_COLOR;
+  const hash = [...ticker].reduce((value, character) => (value * 31 + character.charCodeAt(0)) >>> 0, 0);
+  return palette[hash % palette.length];
 }
+
+function addInstrument(instrument) {
+  if (selectedInstruments.value.length >= 20 || selectedInstruments.value.some(
+    (selected) => selected.ticker === instrument.ticker,
+  )) return;
+  weightBounds[instrument.ticker] = { minimum: 0, maximum: 100 };
+  selectedInstruments.value.push(instrument);
+  searchQuery.value = "";
+}
+
+function removeInstrument(ticker) {
+  selectedInstruments.value = selectedInstruments.value.filter((asset) => asset.ticker !== ticker);
+  delete weightBounds[ticker];
+}
+
+watch(searchQuery, (value) => {
+  clearTimeout(searchTimer);
+  searchController?.abort();
+  const sequence = ++searchSequence;
+  const query = value.trim();
+  searchResults.value = [];
+  searchError.value = "";
+  searching.value = query.length >= 2;
+  if (!searching.value) return;
+  searchTimer = setTimeout(async () => {
+    searchController = new AbortController();
+    try {
+      const matches = await searchInstruments(query, searchController.signal);
+      if (sequence === searchSequence) searchResults.value = matches;
+    } catch (error) {
+      if (sequence === searchSequence && error.name !== "AbortError") searchError.value = error.message;
+    } finally {
+      if (sequence === searchSequence) searching.value = false;
+    }
+  }, 250);
+});
 
 async function optimize(event) {
   const isBacktest = event.submitter?.value === "backtest";
@@ -93,7 +136,7 @@ async function optimize(event) {
   }
 }
 
-watch([selected, weightBounds, lookbackYears, riskFreePercent, trainingPercent], () => {
+watch([selectedInstruments, weightBounds, lookbackYears, riskFreePercent, trainingPercent], () => {
   ++requestSequence;
   requestController?.abort();
   loading.value = false;
@@ -206,20 +249,14 @@ function renderGrowthChart() {
 watch(backtestResult, () => nextTick(renderGrowthChart));
 watch(isDarkMode, () => nextTick(renderGrowthChart));
 
-onMounted(async () => {
+onMounted(() => {
   darkModeQuery.addEventListener("change", onSchemeChange);
-  try {
-    const instruments = await fetchUniverse();
-    for (const { ticker } of instruments) {
-      weightBounds[ticker] = { minimum: 0, maximum: 100 };
-    }
-    universe.value = instruments;
-  } catch (error) {
-    errorMessage.value = `Could not load instruments: ${error.message}`;
-  }
 });
 
 onUnmounted(() => {
+  ++searchSequence;
+  clearTimeout(searchTimer);
+  searchController?.abort();
   ++requestSequence;
   requestController?.abort();
   darkModeQuery.removeEventListener("change", onSchemeChange);
@@ -257,19 +294,41 @@ function pct(value) {
 
     <form @submit.prevent="optimize">
       <section class="panel">
-        <h2>1. Choose instruments</h2>
-        <ul class="instrument-list">
-          <li v-for="instrument in universe" :key="instrument.ticker" class="instrument-row">
-            <label class="instrument-label">
-              <input type="checkbox" v-model="selected[instrument.ticker]" />
-              <span class="swatch" :style="{
-                background: selected[instrument.ticker] ? colorForTicker(instrument.ticker) : 'transparent',
-              }"></span>
+        <h2>1. Find and add assets</h2>
+        <label class="search-label" for="asset-search">Search by ticker or name</label>
+        <input id="asset-search" class="asset-search" type="search" maxlength="80"
+          placeholder="e.g. NVDA, Nvidia, Meta, EQGB" v-model="searchQuery"
+          autocomplete="off" @keydown.enter.prevent="availableResults.length && addInstrument(availableResults[0])" />
+        <p class="hint">Search stocks and ETFs worldwide. Add up to 20 assets. Portfolio returns are reported in GBP,
+          with foreign prices converted using historical exchange rates.</p>
+        <p v-if="searching" class="hint" role="status">Searching…</p>
+        <p v-if="searchError" class="error-banner" role="alert">{{ searchError }}</p>
+        <ul v-if="availableResults.length" class="instrument-list search-results" aria-label="Asset search results">
+          <li v-for="instrument in availableResults" :key="instrument.ticker" class="instrument-row">
+            <button type="button" class="search-result" @click="addInstrument(instrument)"
+              :disabled="selectedInstruments.length >= 20"
+              :aria-label="`Add ${instrument.name} (${instrument.ticker})`">
               <span class="instrument-name">{{ instrument.name }}</span>
               <span class="instrument-ticker">{{ instrument.ticker }}</span>
-              <span class="instrument-class">{{ instrument.asset_class }}</span>
-            </label>
-            <div v-if="selected[instrument.ticker]" class="weight-bounds">
+              <span class="instrument-class">{{ instrument.asset_class }} · {{ instrument.exchange }}</span>
+              <span aria-hidden="true">+</span>
+            </button>
+          </li>
+        </ul>
+        <p v-else-if="searchQuery.trim().length >= 2 && !searching && !searchError" class="hint" role="status">
+          No new stock or ETF matches. Try the exact ticker, including an exchange suffix such as EQGB.L.
+        </p>
+        <p v-if="selectedInstruments.length" class="hint">Selected: {{ selectedInstruments.length }} / 20</p>
+        <ul class="instrument-list" aria-label="Selected assets">
+          <li v-for="instrument in selectedInstruments" :key="instrument.ticker" class="instrument-row">
+            <div class="instrument-label">
+              <span class="swatch" :style="{ background: colorForTicker(instrument.ticker) }"></span>
+              <span class="instrument-name">{{ instrument.name }}</span>
+              <span class="instrument-ticker">{{ instrument.ticker }}</span>
+              <button type="button" class="remove-instrument" @click="removeInstrument(instrument.ticker)"
+                :aria-label="`Remove ${instrument.ticker}`">Remove</button>
+            </div>
+            <div class="weight-bounds">
               <label>
                 Minimum (%)
                 <input type="number" min="0" max="100" step="0.1" required
@@ -348,11 +407,11 @@ function pct(value) {
         </table>
         <div class="stat-grid">
           <div class="stat-tile">
-            <div class="stat-label">Historical annualised return</div>
+            <div class="stat-label">Historical annualised return (GBP)</div>
             <div class="stat-value">{{ pct(result.metrics.historical_return) }}</div>
           </div>
           <div class="stat-tile">
-            <div class="stat-label">Annualised volatility</div>
+            <div class="stat-label">Annualised volatility (GBP)</div>
             <div class="stat-value">{{ pct(result.metrics.volatility) }}</div>
           </div>
           <div class="stat-tile">
@@ -392,12 +451,12 @@ function pct(value) {
         </thead>
         <tbody>
           <tr>
-            <td>Annualised return</td>
+            <td>Annualised return (GBP)</td>
             <td>{{ pct(backtestResult.optimised.metrics.annualised_return) }}</td>
             <td v-if="backtestResult.equal_weight">{{ pct(backtestResult.equal_weight.metrics.annualised_return) }}</td>
           </tr>
           <tr>
-            <td>Annualised volatility</td>
+            <td>Annualised volatility (GBP)</td>
             <td>{{ pct(backtestResult.optimised.metrics.volatility) }}</td>
             <td v-if="backtestResult.equal_weight">{{ pct(backtestResult.equal_weight.metrics.volatility) }}</td>
           </tr>
@@ -492,6 +551,56 @@ h1 {
 }
 .instrument-row:last-child {
   border-bottom: none;
+}
+
+.search-label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+}
+
+.asset-search {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px;
+  background: var(--page-plane);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.search-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  color: var(--text-primary);
+  border: none;
+  padding: 6px 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.search-result:hover,
+.search-result:focus-visible {
+  background: var(--page-plane);
+}
+
+.search-result:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.remove-instrument {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
 }
 
 .instrument-label {
